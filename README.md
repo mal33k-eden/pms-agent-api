@@ -89,7 +89,6 @@ GET /api/drug/{drug_name}?enhanced=true
 
 ### Performance Optimizations
 
-- **Smart Caching**: 30-day TTL on drug safety data reduces redundant API calls and processing
 - **Lazy Loading**: Enhanced analyzer (BioBERT/transformers) initialized on-demand to avoid startup overhead
 - **Database Indexing**: Optimized queries with indexes on drug names and safety data lookups
 - **Query Optimization**: Single-query joins to minimize database round trips

@@ -1,10 +1,3 @@
-"""
- * Author: Emmanuel Kwami Tartey
- * Date: 03 Oct, 2025
- * Time: 11:21 PM
- * Project: pms-agent
- * gitHub: https://github.com/mal33k-eden
-"""
 import logging
 import asyncio
 from setup.db.config import db

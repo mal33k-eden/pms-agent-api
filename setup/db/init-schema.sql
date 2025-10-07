@@ -27,22 +27,6 @@ CREATE TABLE IF NOT EXISTS drug_safety_data(
     expires_at TIMESTAMP DEFAULT (NOW() + INTERVAL '30 days')
 );
 
--- 3. Search tracking
-CREATE TABLE IF NOT EXISTS searches(
-    id SERIAL PRIMARY KEY,
-    search_term VARCHAR(255),
-    drug_id INTEGER REFERENCES drugs(id),
-    found BOOLEAN,
-    created_at TIMESTAMP DEFAULT NOW()
-);
-
--- 4. API cache
-CREATE TABLE IF NOT EXISTS api_cache(
-    cache_key VARCHAR(255) PRIMARY KEY,
-    data JSONB,
-    expires_at TIMESTAMP
-);
-
 -- 5. Processing queue
 CREATE TABLE IF NOT EXISTS processing_queue(
     id SERIAL PRIMARY KEY,
@@ -55,4 +39,3 @@ CREATE TABLE IF NOT EXISTS processing_queue(
 -- Indexes
 CREATE INDEX IF NOT EXISTS idx_drug_name ON drugs(LOWER(name));
 CREATE INDEX IF NOT EXISTS idx_safety_drug ON drug_safety_data(drug_id);
-CREATE INDEX IF NOT EXISTS idx_cache_expires ON api_cache(expires_at);

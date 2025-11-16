@@ -244,7 +244,7 @@ async def fetch_and_analyze_enhanced(
             confidence=confidence_str,
             warnings=synthesis.get('warnings', []),
             study_count=comprehensive_analysis.get('research_quality', {}).get('total_studies', 0),
-            data_source=format_sources(sources),
+            data_source='enhanced_multi_source',
             analysis_type='enhanced'
         )
     except HTTPException:
@@ -365,7 +365,6 @@ async def store_enhanced_drug_data(drug_name: str, comprehensive_analysis: dict,
                 'enhanced_multi_source',
                 confidence_score,
                 research.get('total_studies', 0),
-                json.dumps(metadata)
             )
     except Exception as e:
         logger.error(f"Error storing enhanced drug data: {e}", exc_info=True)

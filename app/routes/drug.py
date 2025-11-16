@@ -1,3 +1,4 @@
+import json
 from typing import Union
 
 from fastapi import APIRouter, Query, HTTPException
@@ -146,7 +147,6 @@ async def get_from_database(drug_name: str, enhanced: bool = False):
             if result:
                 return DrugSafetyResponse(
                     drug_name=result['name'],
-                    pregnancy_category=result['pregnancy_category'],
                     pregnancy_safety=result['pregnancy_safety'],
                     breastfeeding_safety=result['breastfeeding_safety'],
                     recommendations=result['ai_summary'],
@@ -203,25 +203,25 @@ async def fetch_and_analyze(
         )
 
 
-async def fetch_and_analyze_enhanced(analyzer: EnhancedDrugAnalyzer, drug_name: str):
+async def fetch_and_analyze_enhanced(
+        analyzer: EnhancedDrugAnalyzer,
+        drug_name: str,
+        is_pregnant=None,
+        is_breastfeeding=None,
+        trimester=None
+):
     """Fetch from multiple sources and perform comprehensive analysis"""
     try:
-
+        fda_data = analyzer.fda_data or {}
         # Use EnhancedDrugAnalyzer to get data from all sources
-        comprehensive_analysis = await analyzer.analyze_drug_comprehensive(drug_name)
+        comprehensive_analysis = await analyzer.fetch_and_analyze(drug_name, is_pregnant, is_breastfeeding, trimester)
 
         # Extract synthesis results
         synthesis = comprehensive_analysis.get('safety_assessment', {})
         sources = comprehensive_analysis.get('sources_available', {})
-
-        pregnancy_category = None
-        if sources.get('fda'):
-            # TODO:// Figure a way to extract such information from FDA
-            pregnancy_category = None
-
         # Store enhanced data in database (don't fail if storage fails)
         try:
-            await store_enhanced_drug_data(drug_name, comprehensive_analysis, pregnancy_category)
+            await store_enhanced_drug_data(drug_name, comprehensive_analysis, fda_data)
         except Exception as e:
             logger.error(f"Failed to store enhanced drug data for {drug_name}: {e}", exc_info=True)
 
@@ -238,12 +238,14 @@ async def fetch_and_analyze_enhanced(analyzer: EnhancedDrugAnalyzer, drug_name: 
 
         return DrugSafetyResponse(
             drug_name=drug_name,
-            pregnancy_category=pregnancy_category,
             pregnancy_safety=synthesis.get('pregnancy_safety', 'unknown'),
             breastfeeding_safety=synthesis.get('breastfeeding_safety', 'unknown'),
             recommendations=synthesis.get('summary', 'Consult healthcare provider.'),
             confidence=confidence_str,
-            warnings=synthesis.get('warnings', [])
+            warnings=synthesis.get('warnings', []),
+            study_count=comprehensive_analysis.get('research_quality', {}).get('total_studies', 0),
+            data_source=format_sources(sources),
+            analysis_type='enhanced'
         )
     except HTTPException:
         raise
@@ -251,8 +253,22 @@ async def fetch_and_analyze_enhanced(analyzer: EnhancedDrugAnalyzer, drug_name: 
         logger.error(f"Error in enhanced analysis for {drug_name}: {e}", exc_info=True)
         # Fallback to basic analysis if enhanced fails
         logger.info(f"Falling back to basic analysis for {drug_name}")
-        analyzer = get_analyzer(enhanced=False)
-        return await fetch_and_analyze(analyzer, drug_name)
+        return await fetch_and_analyze(drug_name)
+
+
+def format_sources(sources):
+    if not sources:
+        sources = ''
+    elif isinstance(sources, dict):
+        s = ''
+        for k, v in sources.items():
+            if v:
+                s += f"{k.capitalize().replace('_', ' ')}, "
+
+        sources = s
+    elif isinstance(sources, str):
+        sources = sources if sources else ''
+    return sources
 
 
 async def store_drug_data(drug_name, fda_data, ai_analysis, study_count, data_source='fda_ai'):
@@ -281,9 +297,9 @@ async def store_drug_data(drug_name, fda_data, ai_analysis, study_count, data_so
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
                 """,
                 drug_id,
-                fda_data.get('pregnancy_category'),
-                fda_data.get('pregnancy_text'),
-                fda_data.get('breastfeeding_text'),
+                fda_data.get('pregnancy_category', 'No data'),
+                fda_data.get('pregnancy_text', 'No data'),
+                fda_data.get('breastfeeding_text', 'No data'),
                 ai_analysis['pregnancy_safety'],
                 ai_analysis['breastfeeding_safety'],
                 ai_analysis['summary'],
@@ -297,7 +313,7 @@ async def store_drug_data(drug_name, fda_data, ai_analysis, study_count, data_so
         raise
 
 
-async def store_enhanced_drug_data(drug_name: str, comprehensive_analysis: dict, pregnancy_category: str = None):
+async def store_enhanced_drug_data(drug_name: str, comprehensive_analysis: dict, fda_data: dict = None):
     """Store enhanced multi-source analysis data in database"""
     try:
         async with db.pool.acquire() as conn:
@@ -307,7 +323,9 @@ async def store_enhanced_drug_data(drug_name: str, comprehensive_analysis: dict,
 
             # Determine generic name from available sources
             generic_name = drug_name  # Default to drug_name if not found
-
+            metadata = {
+                'sources': comprehensive_analysis['sources_available']
+            }
             # Insert or get drug
             drug_id = await conn.fetchval(
                 """
@@ -337,16 +355,17 @@ async def store_enhanced_drug_data(drug_name: str, comprehensive_analysis: dict,
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
                 """,
                 drug_id,
-                pregnancy_category,  # TODO:// i should figure out a way to extract this information
-                f"Enhanced analysis from {sources}",
-                f"Enhanced analysis from {sources}",
+                fda_data.get('pregnancy_category', 'No data'),
+                fda_data.get('pregnancy_text', 'No data'),
+                fda_data.get('breastfeeding_text', 'No data'),
                 synthesis.get('pregnancy_safety', 'unknown'),
                 synthesis.get('breastfeeding_safety', 'unknown'),
                 synthesis.get('summary', 'Consult healthcare provider.'),
                 synthesis.get('warnings', []),
                 'enhanced_multi_source',
                 confidence_score,
-                research.get('total_studies', 0)
+                research.get('total_studies', 0),
+                json.dumps(metadata)
             )
     except Exception as e:
         logger.error(f"Error storing enhanced drug data: {e}", exc_info=True)

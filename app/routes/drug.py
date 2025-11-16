@@ -212,10 +212,10 @@ async def fetch_and_analyze_enhanced(
 ):
     """Fetch from multiple sources and perform comprehensive analysis"""
     try:
-        fda_data = analyzer.fda_data or {}
+
         # Use EnhancedDrugAnalyzer to get data from all sources
         comprehensive_analysis = await analyzer.fetch_and_analyze(drug_name, is_pregnant, is_breastfeeding, trimester)
-
+        fda_data = analyzer.fda_data or {}
         # Extract synthesis results
         synthesis = comprehensive_analysis.get('safety_assessment', {})
         sources = comprehensive_analysis.get('sources_available', {})

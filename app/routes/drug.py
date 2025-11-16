@@ -1,35 +1,54 @@
+from typing import Union
+
 from fastapi import APIRouter, Query, HTTPException
 import logging
 
 from app.data.models import DrugSafetyResponse
 from app.services.ai.basic_analyzer import DrugSafetyAI
+from app.services.ai.deep_analyzer import EnhancedDrugAnalyzer
 from app.services.fda_client import FDAClient
 from setup.db.config import db
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
-ai_analyzer = DrugSafetyAI()
 fda_client = FDAClient()
 
 # Lazy load enhanced analyzer to avoid startup errors
 enhanced_analyzer = None
 
 
-def get_enhanced_analyzer():
-    """Lazy load enhanced analyzer to handle initialization errors gracefully"""
-    global enhanced_analyzer
-    if enhanced_analyzer is None:
+def get_analyzer(enhanced: bool = False) -> Union[DrugSafetyAI, EnhancedDrugAnalyzer]:
+    """
+    Get appropriate analyzer instance based on enhanced parameter.
+
+    Args:
+        enhanced: If True, returns EnhancedDrugAnalyzer, otherwise returns basic DrugSafetyAI
+
+    Returns:
+        Union[DrugSafetyAI, EnhancedDrugAnalyzer]: The appropriate analyzer instance
+
+    Raises:
+        HTTPException: If enhanced analyzer fails to initialize
+    """
+    if enhanced:
         try:
-            from app.services.ai.deep_analyzer import EnhancedDrugAnalyzer
-            enhanced_analyzer = EnhancedDrugAnalyzer()
+            return EnhancedDrugAnalyzer()
         except Exception as e:
             logger.error(f"Failed to initialize EnhancedDrugAnalyzer: {e}", exc_info=True)
             raise HTTPException(
                 status_code=503,
                 detail="Enhanced analysis is currently unavailable. Please try basic analysis or contact support."
             )
-    return enhanced_analyzer
+    else:
+        try:
+            return DrugSafetyAI()
+        except Exception as e:
+            logger.error(f"Failed to initialize DrugSafetyAI: {e}", exc_info=True)
+            raise HTTPException(
+                status_code=503,
+                detail="Basic analysis is currently unavailable. Please try again later."
+            )
 
 
 @router.get("/api/drug/{drug_name}", response_model=DrugSafetyResponse)
@@ -73,10 +92,7 @@ async def get_drug_safety(
             return drug_data
 
         # Not in DB - fetch and analyze
-        if enhanced:
-            drug_data = await fetch_and_analyze_enhanced(drug_name)
-        else:
-            drug_data = await fetch_and_analyze(drug_name)
+        drug_data = await analyze(enhanced=enhanced, drug_name=drug_name)
 
         return drug_data
 
@@ -88,6 +104,25 @@ async def get_drug_safety(
             status_code=500,
             detail=f"An error occurred while processing your request. Please try again later."
         )
+
+
+async def analyze(enhanced, drug_name):
+    """
+    Analyze drug safety data using the provided analyzer.
+
+    Args:
+        enhanced (bool): Whether to use enhanced analysis mode
+        drug_name (str): Name of the drug to analyze
+
+    Returns:
+        DrugSafetyResponse: Analyzed drug safety data
+    """
+    analyzer = get_analyzer(enhanced)
+    if enhanced:
+        drug_data = await fetch_and_analyze_enhanced(analyzer, drug_name)
+    else:
+        drug_data = await fetch_and_analyze(analyzer, drug_name)
+    return drug_data
 
 
 async def get_from_database(drug_name: str, enhanced: bool = False):
@@ -126,7 +161,7 @@ async def get_from_database(drug_name: str, enhanced: bool = False):
         return None
 
 
-async def fetch_and_analyze(drug_name: str):
+async def fetch_and_analyze(analyzer: DrugSafetyAI, drug_name: str):
     """Fetch from FDA and analyze with AI"""
     try:
         # Get FDA data
@@ -143,10 +178,10 @@ async def fetch_and_analyze(drug_name: str):
             )
 
         # Analyze with AI
-        ai_analysis = await ai_analyzer.analyze_fda_data(drug_name, fda_data)
+        ai_analysis = await analyzer.analyze_fda_data(drug_name, fda_data)
 
         # Get research count
-        study_count = await ai_analyzer.get_pubmed_count(drug_name)
+        study_count = await analyzer.get_pubmed_count(drug_name)
 
         # Store in database (don't fail if storage fails)
         try:
@@ -171,11 +206,9 @@ async def fetch_and_analyze(drug_name: str):
         )
 
 
-async def fetch_and_analyze_enhanced(drug_name: str):
+async def fetch_and_analyze_enhanced(analyzer: EnhancedDrugAnalyzer, drug_name: str):
     """Fetch from multiple sources and perform comprehensive analysis"""
     try:
-        # Get enhanced analyzer with error handling
-        analyzer = get_enhanced_analyzer()
 
         # Use EnhancedDrugAnalyzer to get data from all sources
         comprehensive_analysis = await analyzer.analyze_drug_comprehensive(drug_name)
@@ -221,7 +254,8 @@ async def fetch_and_analyze_enhanced(drug_name: str):
         logger.error(f"Error in enhanced analysis for {drug_name}: {e}", exc_info=True)
         # Fallback to basic analysis if enhanced fails
         logger.info(f"Falling back to basic analysis for {drug_name}")
-        return await fetch_and_analyze(drug_name)
+        analyzer = get_analyzer(enhanced=False)
+        return await fetch_and_analyze(analyzer, drug_name)
 
 
 async def store_drug_data(drug_name, fda_data, ai_analysis, study_count, data_source='fda_ai'):

@@ -7,6 +7,9 @@ from langgraph.graph import StateGraph, END
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from app.services.ai.base_analyzer_class import BaseDrugAnalyzer, DrugAnalysisResult
+from app.services.fda_client import FDAClient
+
 logger = logging.getLogger(__name__)
 
 
@@ -21,14 +24,16 @@ class DrugAnalysisState(TypedDict):
     error: Optional[str]
 
 
-class DrugSafetyAI:
+class DrugSafetyAI(BaseDrugAnalyzer):
     def __init__(self):
+        super().__init__()
         self.client = ChatAnthropic(
-            model="claude-3-5-sonnet-20241022",
+            model="claude-sonnet-4-20250514",
             api_key=os.getenv("ANTHROPIC_API_KEY"),
             temperature=0.1,
             max_tokens=1024
         )
+        self.fda_client = FDAClient()
         self.workflow = self._build_workflow()
 
     def _build_workflow(self):
@@ -66,8 +71,6 @@ class DrugSafetyAI:
         updates = {}
         if not state.get("drug_name"):
             updates["error"] = "Drug name is required"
-        elif not state.get("fda_data"):
-            updates["error"] = "FDA data is required"
         return updates
 
     def _analyze_pregnancy(self, state: Dict) -> Dict:
@@ -76,14 +79,12 @@ class DrugSafetyAI:
         fda_data = state.get("fda_data") or {}
 
         pregnancy_text = fda_data.get('pregnancy_text') or 'No data'
-        pregnancy_category = fda_data.get('pregnancy_category') or 'Unknown'
 
         messages = [
             SystemMessage(content="""You are a pharmacist analyzing drug safety for pregnancy.
             Respond with only one word: 'safe', 'caution', or 'avoid'."""),
             HumanMessage(content=f"""
             Analyze {drug_name} pregnancy safety:
-            Category: {pregnancy_category}
             Information: {pregnancy_text[:500] if pregnancy_text else 'No data'}
             """)
         ]
@@ -177,131 +178,67 @@ class DrugSafetyAI:
             "summary": f"Unable to analyze {drug_name}. Please consult your healthcare provider."
         }
 
-    async def analyze_fda_data(self, drug_name: str, fda_data: Dict) -> Dict:
-        """Analyze FDA data using LangGraph workflow with Claude"""
-        initial_state: DrugAnalysisState = {
-            "drug_name": drug_name,
-            "fda_data": fda_data,
-            "pregnancy_safety": "",
-            "breastfeeding_safety": "",
-            "warnings": [],
-            "summary": "",
-            "error": None
-        }
+    async def fetch_and_analyze(
+            self, drug_name: str,
+            is_pregnant=None,
+            is_breastfeeding=None,
+            trimester=None
+    ) -> DrugAnalysisResult:
+        """
+        Fetch FDA data and perform basic analysis in a single operation.
 
+        This is the main entry point for basic drug analysis. It handles
+        fetching FDA data and performing the analysis through the LangGraph workflow.
+
+        Args:
+            drug_name: Name of the drug to analyze
+
+        Returns:
+            DrugAnalysisResult with safety assessment
+        """
         try:
-            result = self.workflow.invoke(initial_state)
+            # Fetch FDA data
+            fda_data = await self.fda_client.search_drug_label(drug_name)
 
-            # Check if result is None or empty
-            if not result:
-                logger.error("Workflow returned None or empty result")
-                return self._fallback_response(drug_name)
-
-            return {
-                "pregnancy_safety": result.get("pregnancy_safety", "unknown"),
-                "breastfeeding_safety": result.get("breastfeeding_safety", "unknown"),
-                "warnings": result.get("warnings", ["Consult healthcare provider"]),
-                "summary": result.get("summary",
-                                      f"Unable to analyze {drug_name}. Please consult your healthcare provider.")
+            if not fda_data:
+                logger.warning(f"No FDA data found for {drug_name}")
+                return self._create_fallback_response(drug_name)
+            self.fda_data = fda_data
+            # Initialize workflow state with fetched FDA data
+            initial_state: DrugAnalysisState = {
+                "drug_name": drug_name,
+                "fda_data": fda_data,
+                "pregnancy_safety": "",
+                "breastfeeding_safety": "",
+                "warnings": [],
+                "summary": "",
+                "error": None
             }
+
+            # Run the workflow
+            try:
+                result = self.workflow.invoke(initial_state)
+
+                if not result:
+                    logger.error(f"Workflow returned empty result for {drug_name}")
+                    return self._create_fallback_response(drug_name)
+
+                # Build and return result with metadata
+                analysis_result: DrugAnalysisResult = {
+                    "drug_name": drug_name,
+                    "pregnancy_safety": result.get("pregnancy_safety", "unknown"),
+                    "breastfeeding_safety": result.get("breastfeeding_safety", "unknown"),
+                    "warnings": result.get("warnings", ["Consult healthcare provider"]),
+                    "summary": result.get("summary",
+                                          f"Unable to analyze {drug_name}. Please consult your healthcare provider."),
+                    "confidence": 0.6,  # Moderate confidence for FDA-only analysis
+                    "sources_used": ["fda"]
+                }
+                return analysis_result
+            except Exception as e:
+                logger.error(f"Workflow execution error for {drug_name}: {e}", exc_info=True)
+                return self._create_fallback_response(drug_name)
+
         except Exception as e:
-            logger.error(f"Workflow execution error: {e}", exc_info=True)
-            return self._fallback_response(drug_name)
-
-    def _fallback_response(self, drug_name: str) -> Dict:
-        return {
-            "pregnancy_safety": "unknown",
-            "breastfeeding_safety": "unknown",
-            "warnings": ["Consult healthcare provider"],
-            "summary": f"Unable to analyze {drug_name}. Please consult your healthcare provider."
-        }
-
-    async def synthesize_all_sources(self, all_data: Dict) -> Dict:
-        """Synthesize data from multiple sources (FDA, DailyMed, PubMed, BioBERT)"""
-        fda_data = all_data.get('fda') or {}
-        dailymed_data = all_data.get('dailymed') or {}
-        pubmed_data = all_data.get('pubmed') or {}
-        biobert_extracted = all_data.get('biobert_extracted') or {}
-
-        # Build comprehensive context for Claude
-        context = self._build_synthesis_context(fda_data, dailymed_data, pubmed_data, biobert_extracted)
-
-        messages = [
-            SystemMessage(content="""You are a pharmacist synthesizing drug safety data from multiple authoritative sources.
-            Analyze all available data and provide a comprehensive safety assessment.
-            Respond in JSON format with keys: pregnancy_safety, breastfeeding_safety, warnings, summary, evidence_quality"""),
-            HumanMessage(content=context)
-        ]
-
-        try:
-            response = self.client.invoke(messages)
-            synthesis = json.loads(response.content)
-            return synthesis
-        except Exception as e:
-            logger.error(f"Synthesis error: {e}", exc_info=True)
-            # Fallback to basic FDA analysis if synthesis fails
-            if fda_data:
-                return await self.analyze_fda_data(
-                    fda_data.get('generic_names', ['Unknown'])[0] if fda_data.get('generic_names') else 'Unknown',
-                    fda_data
-                )
-            return self._fallback_response("this medication")
-
-    def _build_synthesis_context(self, fda_data: Dict, dailymed_data: Dict, pubmed_data: Dict,
-                                 biobert_data: Dict) -> str:
-        """Build comprehensive context from all data sources"""
-        context_parts = []
-
-        # FDA data
-        if fda_data:
-            drug_name = fda_data.get('generic_names', ['Unknown'])[0] if fda_data.get('generic_names') else 'Unknown'
-            context_parts.append(f"Drug: {drug_name}")
-
-            if fda_data.get('pregnancy_text'):
-                context_parts.append(f"\nFDA Pregnancy Data:\n{fda_data['pregnancy_text'][:800]}")
-
-            if fda_data.get('breastfeeding_text'):
-                context_parts.append(f"\nFDA Breastfeeding Data:\n{fda_data['breastfeeding_text'][:800]}")
-
-        # DailyMed data
-        if dailymed_data and dailymed_data.get('spl_data'):
-            context_parts.append(f"\nDailyMed SPL Data:\n{str(dailymed_data['spl_data'])[:500]}")
-
-        # PubMed research data
-        if pubmed_data:
-            context_parts.append(f"\nResearch Evidence:")
-            context_parts.append(f"- Total studies: {pubmed_data.get('total_studies', 0)}")
-            context_parts.append(f"- Recent studies (last 5 years): {pubmed_data.get('recent_studies', 0)}")
-            context_parts.append(f"- Has randomized controlled trials: {pubmed_data.get('has_rct', False)}")
-            context_parts.append(f"- Has meta-analysis: {pubmed_data.get('has_meta_analysis', False)}")
-
-            if pubmed_data.get('key_findings'):
-                context_parts.append(f"\nKey Research Findings:\n{pubmed_data['key_findings'][:500]}")
-
-        # BioBERT extracted entities
-        if biobert_data:
-            context_parts.append(f"\nExtracted Medical Entities:\n{str(biobert_data)[:300]}")
-
-        context_parts.append(
-            """
-                Based on all available data, provide:
-                1. pregnancy_safety: 'safe', 'caution', or 'avoid'
-                2. breastfeeding_safety: 'safe', 'caution', or 'avoid'
-                3. warnings: Array of key warnings (max 5)
-                4. summary: Patient-friendly 2-3 sentence summary
-                5. evidence_quality: 'high', 'moderate', or 'low'
-            """
-        )
-
-        return "\n".join(context_parts)
-
-    async def get_pubmed_count(self, drug_name: str) -> int:
-        """Get research count (simplified for demo)"""
-        # In real implementation, would call PubMed API
-        # For now, return mock data
-        mock_counts = {
-            "tylenol": 1250,
-            "zoloft": 845,
-            "amoxicillin": 2100
-        }
-        return mock_counts.get(drug_name.lower(), 10)
+            logger.error(f"Error in fetch_and_analyze for {drug_name}: {e}", exc_info=True)
+            return self._create_fallback_response(drug_name)

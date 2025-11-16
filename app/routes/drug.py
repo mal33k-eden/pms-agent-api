@@ -161,29 +161,24 @@ async def get_from_database(drug_name: str, enhanced: bool = False):
         return None
 
 
-async def fetch_and_analyze(analyzer: DrugSafetyAI, drug_name: str):
-    """Fetch from FDA and analyze with AI"""
+async def fetch_and_analyze(
+        analyzer: DrugSafetyAI,
+        drug_name: str,
+        is_pregnant=None,
+        is_breastfeeding=None,
+        trimester=None
+):
+    """Fetch from FDA and analyze with basic AI analyzer"""
     try:
-        # Get FDA data
-        fda_data = await fda_client.search_drug_label(drug_name)
-        if not fda_data:
-            # Pure AI fallback
-            return DrugSafetyResponse(
-                drug_name=drug_name,
-                pregnancy_category="Unknown",
-                pregnancy_safety="unknown",
-                breastfeeding_safety="unknown",
-                recommendations="No FDA data available. Consult healthcare provider.",
-                confidence="low"
-            )
+        # Fetch and analyze in one operation
+        ai_analysis = await analyzer.fetch_and_analyze(drug_name, is_pregnant, is_breastfeeding, trimester)
 
-        # Analyze with AI
-        ai_analysis = await analyzer.analyze_fda_data(drug_name, fda_data)
-
-        # Get research count
+        # Get research count for confidence determination
         study_count = await analyzer.get_pubmed_count(drug_name)
 
-        # Store in database (don't fail if storage fails)
+        fda_data = analyzer.fda_data or {}
+
+        # Store in database
         try:
             await store_drug_data(drug_name, fda_data, ai_analysis, study_count, data_source='fda_ai')
         except Exception as e:
@@ -191,12 +186,14 @@ async def fetch_and_analyze(analyzer: DrugSafetyAI, drug_name: str):
 
         return DrugSafetyResponse(
             drug_name=drug_name,
-            pregnancy_category=fda_data.get('pregnancy_category'),
             pregnancy_safety=ai_analysis.get('pregnancy_safety', 'unknown'),
             breastfeeding_safety=ai_analysis.get('breastfeeding_safety', 'unknown'),
             recommendations=ai_analysis.get('summary', 'Consult healthcare provider.'),
             confidence="high" if study_count > 100 else "moderate",
-            warnings=ai_analysis.get('warnings', [])
+            warnings=ai_analysis.get('warnings', []),
+            study_count=study_count,
+            data_source='fda',
+            analysis_type='basic'
         )
     except Exception as e:
         logger.error(f"Error in fetch_and_analyze for {drug_name}: {e}", exc_info=True)
